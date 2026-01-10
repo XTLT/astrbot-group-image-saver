@@ -1,0 +1,6 @@
+name: astrbot_plugin_group_image_saver
+display_name: 群聊图片自动保存
+desc: 自动保存群聊中发送的图片，并按群号和日期分类归档，支持群组白名单/黑名单过滤和路径警告
+version: 0.0.1
+author: AstrBotHelper
+repo: https://github.com/your-username/astrbot_plugin_group_image_saver
