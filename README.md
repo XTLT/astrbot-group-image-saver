@@ -30,7 +30,7 @@ AstrBot 群聊图片自动保存插件
 
 📦 安装
 
-方式一：通过 GitHub 安装（推荐）
+方式一：通过 Gitee 安装（推荐）
 
 在 AstrBot 管理面板的插件市场中搜索 group_image_saver 或输入仓库地址安装。
 
