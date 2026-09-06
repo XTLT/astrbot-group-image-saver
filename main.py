@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 AstrBot 插件：群聊图片自动保存器
-版本: 0.0.1
+版本: 0.1.0
 
 功能：
 1. 自动保存群聊中发送的图片
@@ -14,6 +14,8 @@ AstrBot 插件：群聊图片自动保存器
 7. 挂载检测和智能路径回退
 8. 支持群组白名单/黑名单过滤
 9. 路径未挂载时发送警告到指定群
+10. 支持图片备注（单图备注入文件名，多图备注写入txt）
+11. 多来源取图（消息数据/组件文件转换/URL/API/CQ码）
 """
 
 import os
@@ -38,7 +40,7 @@ from .private_filter import PrivateFilter
 from .image_saver import ImageSaver
 
 
-PLUGIN_VERSION = "0.0.1"
+PLUGIN_VERSION = "0.1.0"
 
 
 def _safe_message_datetime(event: AstrMessageEvent) -> datetime:
@@ -106,7 +108,8 @@ class GroupImageSaverPlugin(Star):
             "save_private_images": True,
             "private_filter_mode": "all",
             "private_whitelist": [],
-            "private_blacklist": []
+            "private_blacklist": [],
+            "save_notes": True
         }
         
         for key, value in default_config.items():
@@ -177,6 +180,45 @@ class GroupImageSaverPlugin(Star):
             logger.debug(f"⏭️ 平台 {platform_str} 不在支持列表，跳过图片保存")
             return False
         return True
+    
+    def _get_notes(self, event: AstrMessageEvent) -> str:
+        """从消息额外信息中获取备注"""
+        try:
+            get_extra = getattr(event, 'get_extra', None)
+            if callable(get_extra):
+                notes = get_extra("notes", None)
+                if notes:
+                    return str(notes).strip()
+        except Exception:
+            pass
+        return ""
+    
+    def _apply_notes(self, saved_paths: List[Path], notes: str):
+        """将备注应用到已保存的图片：单图追加到文件名，多图写入备注txt"""
+        try:
+            notes = str(notes).strip()
+            if not notes or not saved_paths:
+                return
+            
+            if len(saved_paths) == 1:
+                path = saved_paths[0]
+                new_name = f"{path.stem}_{notes}{path.suffix}"
+                new_path = self.image_saver._dedupe_path(path.parent / new_name)
+                path.rename(new_path)
+                logger.info(f"📝 已为单张图片添加备注: {new_path.name}")
+            else:
+                note_file = saved_paths[0].parent / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_备注.txt"
+                note_file = self.image_saver._dedupe_path(note_file)
+                with open(note_file, 'w', encoding='utf-8') as f:
+                    f.write(f"备注信息: {notes}\n")
+                    f.write(f"保存时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"图片数量: {len(saved_paths)}\n")
+                    f.write("图片列表:\n")
+                    for i, p in enumerate(saved_paths, 1):
+                        f.write(f"  {i}. {p.name}\n")
+                logger.info(f"📝 已为 {len(saved_paths)} 张图片创建备注文件: {note_file}")
+        except Exception as e:
+            logger.error(f"❌ 应用备注失败: {e}")
     
     async def send_warning_message(self):
         """发送路径回退警告到指定群"""
@@ -282,6 +324,7 @@ class GroupImageSaverPlugin(Star):
         logger.info(f"📂 保存目录: {save_dir}")
         
         saved_count = 0
+        saved_paths = []
         for idx, img_comp in enumerate(image_components):
             file_source = img_comp.file
             if not file_source:
@@ -312,6 +355,16 @@ class GroupImageSaverPlugin(Star):
                     logger.info("🔍 尝试直接从消息组件获取图片数据")
                     success = await self.image_saver.save_image(img_comp.data, save_path.parent, save_path.name)
                 
+                # 通过消息组件转换为本地文件（平台原生能力，可靠性高）
+                if not success and hasattr(img_comp, 'convert_to_file_path'):
+                    try:
+                        local_path = await img_comp.convert_to_file_path()
+                        if local_path:
+                            logger.info(f"🔍 通过消息组件文件转换获取图片: {local_path}")
+                            success = await self.image_saver._save_local_file(str(local_path), save_path)
+                    except Exception as e:
+                        logger.debug(f"消息组件文件转换失败: {e}")
+                
                 if not success and hasattr(img_comp, 'url') and img_comp.url:
                     logger.info(f"🔍 尝试从图片URL下载: {img_comp.url}")
                     success = await self.image_saver._save_url_image(img_comp.url, save_path)
@@ -341,6 +394,7 @@ class GroupImageSaverPlugin(Star):
                 
                 full_path = save_path
                 if full_path.exists():
+                    saved_paths.append(full_path)
                     file_size = full_path.stat().st_size
                     logger.info(f"✅ 图片 {idx} 保存成功: {full_path} ({file_size} bytes)")
                     logger.info(f"📁 绝对路径: {full_path.absolute()}")
@@ -362,6 +416,12 @@ class GroupImageSaverPlugin(Star):
             else:
                 self.stats['failed_saves'] += 1
                 logger.error(f"❌ 图片 {idx} 保存失败")
+        
+        # 备注功能：单图追加到文件名，多图写入备注文件
+        if self.config.get("save_notes", True):
+            notes = self._get_notes(event)
+            if notes and saved_paths:
+                self._apply_notes(saved_paths, notes)
         
         self.stats['last_save_time'] = datetime.now().isoformat()
         
@@ -436,6 +496,7 @@ class GroupImageSaverPlugin(Star):
         logger.info(f"📂 保存目录: {save_dir}")
         
         saved_count = 0
+        saved_paths = []
         for idx, img_comp in enumerate(image_components):
             file_source = img_comp.file
             if not file_source:
@@ -466,6 +527,16 @@ class GroupImageSaverPlugin(Star):
                     logger.info("🔍 尝试直接从消息组件获取图片数据")
                     success = await self.image_saver.save_image(img_comp.data, save_path.parent, save_path.name)
                 
+                # 通过消息组件转换为本地文件（平台原生能力，可靠性高）
+                if not success and hasattr(img_comp, 'convert_to_file_path'):
+                    try:
+                        local_path = await img_comp.convert_to_file_path()
+                        if local_path:
+                            logger.info(f"🔍 通过消息组件文件转换获取图片: {local_path}")
+                            success = await self.image_saver._save_local_file(str(local_path), save_path)
+                    except Exception as e:
+                        logger.debug(f"消息组件文件转换失败: {e}")
+                
                 if not success and hasattr(img_comp, 'url') and img_comp.url:
                     logger.info(f"🔍 尝试从图片URL下载: {img_comp.url}")
                     success = await self.image_saver._save_url_image(img_comp.url, save_path)
@@ -495,6 +566,7 @@ class GroupImageSaverPlugin(Star):
                 
                 full_path = save_path
                 if full_path.exists():
+                    saved_paths.append(full_path)
                     file_size = full_path.stat().st_size
                     logger.info(f"✅ 图片 {idx} 保存成功: {full_path} ({file_size} bytes)")
                     logger.info(f"📁 绝对路径: {full_path.absolute()}")
@@ -505,6 +577,12 @@ class GroupImageSaverPlugin(Star):
             else:
                 self.stats['failed_saves'] += 1
                 logger.error(f"❌ 图片 {idx} 保存失败")
+        
+        # 备注功能：单图追加到文件名，多图写入备注文件
+        if self.config.get("save_notes", True):
+            notes = self._get_notes(event)
+            if notes and saved_paths:
+                self._apply_notes(saved_paths, notes)
         
         self.stats['last_save_time'] = datetime.now().isoformat()
         
@@ -670,6 +748,7 @@ class GroupImageSaverPlugin(Star):
 最大文件: {self.image_saver.max_file_size / (1024*1024)} MB
 过滤模式: {self.config.get('group_filter_mode', 'all')}
 警告群号: {self.warning_group or '未配置'}
+备注功能: {self.config.get('save_notes', True)}
 
 📈 当前统计:
 检测图片: {self.stats['total_images']}
@@ -733,6 +812,7 @@ class GroupImageSaverPlugin(Star):
 警告群号: {self.warning_group or '未配置'}
 好友图片保存: {self.config.get('save_private_images', True)}
 好友过滤模式: {self.config.get('private_filter_mode', 'all')}
+备注功能: {self.config.get('save_notes', True)}
 
 💡 使用命令:
 /imgsave_config - 显示详细配置和路径状态
