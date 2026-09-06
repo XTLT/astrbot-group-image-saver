@@ -48,15 +48,15 @@ AstrBot 群聊图片自动保存插件
 
 配置项 默认值 说明
 
-base_save_path data/saved_images 图片保存的根目录
+base_save_path /AstrBot/data/saved_images 图片保存的根目录
 
 save_by_group true 是否按群号分子文件夹
 
-max_file_size_mb 10 单张图片最大大小（MB）
+max_file_size_mb 50 单张图片最大大小（MB）
 
 save_to_log true 是否记录保存日志
 
-supported_platforms ["AIOCQHTTP", "TELEGRAM", "GEWECHAT"] 支持的平台
+supported_platforms ["AIOCQHTTP"] 支持的平台（其他平台需自行验证）
 
 group_filter_mode all 群组过滤模式：all=所有群, whitelist=仅白名单, blacklist=不保存黑名单
 
@@ -90,15 +90,15 @@ private_blacklist [] 黑名单QQ好友列表
 
 🔧 平台兼容性
 
-根据 AstrBot 官方文档，以下平台适配器支持良好：
+根据 AstrBot 官方文档，以下平台适配器支持情况如下：
 
 平台 支持状态 备注
 
 QQ个人号(aiocqhttp) ✅ 支持 功能完整
 
-Telegram ✅ 支持 功能完整
+Telegram ⚠️ 有限支持 图片获取依赖 OneBot API，可能无法获取
 
-飞书 ✅ 支持 功能完整
+飞书 ⚠️ 有限支持 图片获取依赖 OneBot API，可能无法获取
 
 QQ官方接口 ⚠️ 有限支持 可能无法获取图片
 
@@ -169,6 +169,8 @@ QQ官方接口 ⚠️ 有限支持 可能无法获取图片
 AstrBot会自动重新加载插件
 
 插件使用新的配置初始化
+
+通过命令（/imgsave_groups、/imgsave_private）修改的过滤配置会自动持久化，插件重载后仍然生效
 
 路径处理：
 

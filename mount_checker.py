@@ -8,7 +8,10 @@ from astrbot.api import logger
 
 class MountChecker:
     """挂载点检测器"""
-    
+
+    # Windows 平台没有 Linux 容器挂载概念，跳过挂载检测
+    _IS_WINDOWS = os.name == 'nt'
+
     @staticmethod
     def is_path_mounted(path: Path) -> Tuple[bool, str]:
         """
@@ -23,7 +26,10 @@ class MountChecker:
         try:
             if not path.exists():
                 return False, f"❌ 路径不存在: {path}"
-            
+
+            if MountChecker._IS_WINDOWS:
+                return True, f"✅ Windows 平台，跳过挂载检测: {path}"
+
             if os.path.exists('/proc/mounts'):
                 try:
                     with open('/proc/mounts', 'r') as f:
@@ -50,7 +56,8 @@ class MountChecker:
             
             path_str = str(path.resolve())
             for mount_point in known_mounts:
-                if path_str.startswith(mount_point):
+                # 使用带边界的前缀匹配，避免 /AstrBot/dataxxx 之类路径被误判
+                if path_str == mount_point or path_str.startswith(mount_point + '/'):
                     return True, f"✅ 路径在已知挂载点下: {mount_point}"
             
             try:

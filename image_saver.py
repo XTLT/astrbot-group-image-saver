@@ -5,6 +5,7 @@ import aiofiles
 from pathlib import Path
 from typing import Dict, Any, Tuple
 from datetime import datetime
+from urllib.parse import quote
 
 from astrbot.api import logger
 from .mount_checker import MountChecker
@@ -16,7 +17,13 @@ class ImageSaver:
     """图片保存管理器"""
     
     IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.ico', '.tiff'}
-    
+
+    # OneBot (aiocqhttp) 图片获取 API 地址；仅 OneBot 系平台可用
+    ONE_BOT_API_BASE = "http://localhost:5700"
+
+    # 网络图片下载超时时间（秒）
+    DOWNLOAD_TIMEOUT_SECONDS = 30
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         
@@ -47,6 +54,7 @@ class ImageSaver:
         logger.info(f"📏 最大文件大小: {self.max_file_size / (1024*1024)} MB")
         logger.info(f"📊 群组过滤模式: {self.group_filter.mode}")
         logger.info(f"📊 好友过滤模式: {self.private_filter.mode}")
+        logger.info(f"📊 支持平台: {', '.join(sorted(self.supported_platforms))}")
         
         if not self.path_status.get("is_mounted", False):
             logger.warning(f"⚠️ 警告：路径未挂载到宿主机，容器重启后数据将丢失！")
@@ -108,8 +116,8 @@ class ImageSaver:
             logger.warning(f"⚠️ 挂载状态: {mount_msg}")
             logger.warning("⚠️ 容器重启后数据将丢失！")
             
-            result["message"] = f"⚠️ 路径可用但未挂载: {path.absolute()}"
-            return path, result
+            # 自动回退到已挂载路径，避免数据写入容器内临时路径后丢失
+            return self._fallback_to_mounted_path(result)
         
         try:
             if path.exists():
@@ -241,7 +249,8 @@ class ImageSaver:
             for error in self.path_status.get("errors", []):
                 logger.error(f"  {error}")
         
-        if group_id:
+        # save_by_group 为 false 时不创建群号子文件夹
+        if group_id and self.save_by_group:
             group_path = self.base_save_path / str(group_id)
             try:
                 if not group_path.exists():
@@ -285,22 +294,28 @@ class ImageSaver:
         
         return date_path
     
+    def _dedupe_path(self, save_path: Path) -> Path:
+        """文件已存在时自动追加序号，避免覆盖已有图片"""
+        if not save_path.exists():
+            return save_path
+        stem = save_path.stem
+        suffix = save_path.suffix
+        counter = 1
+        candidate = save_path.with_name(f"{stem}_{counter}{suffix}")
+        while candidate.exists():
+            counter += 1
+            candidate = save_path.with_name(f"{stem}_{counter}{suffix}")
+        logger.debug(f"📝 文件已存在，使用新名称: {candidate.name}")
+        return candidate
+    
     async def save_image(self, file_source: Any, save_dir: Path, filename: str) -> bool:
         """保存图片到本地"""
-        save_path = save_dir / filename
+        save_path = self._dedupe_path(save_dir / filename)
         
         try:
             if not save_dir.exists():
                 logger.error(f"❌ 保存目录不存在: {save_dir}")
                 return False
-            
-            if save_path.exists():
-                base_name = save_path.stem
-                counter = 1
-                while save_path.exists():
-                    save_path = save_dir / f"{base_name}_{counter}{save_path.suffix}"
-                    counter += 1
-                logger.debug(f"📝 文件已存在，使用新名称: {save_path.name}")
             
             if isinstance(file_source, str):
                 if file_source.startswith('file://'):
@@ -320,6 +335,9 @@ class ImageSaver:
                     logger.info(f"🔍 文件路径处理失败，尝试使用aiocqhttp API: {file_source}")
                     return await self._save_image_from_event(file_source, save_path)
             elif isinstance(file_source, bytes):
+                if len(file_source) > self.max_file_size:
+                    logger.warning(f"⚠️ 二进制数据过大 ({len(file_source)/1024/1024:.2f}MB)，跳过")
+                    return False
                 logger.info(f"🔢 保存二进制数据，大小: {len(file_source)} bytes")
                 async with aiofiles.open(save_path, 'wb') as f:
                     await f.write(file_source)
@@ -363,41 +381,79 @@ class ImageSaver:
             return False
     
     async def _save_url_image(self, url: str, save_path: Path) -> bool:
-        """从URL下载并保存图片"""
+        """从URL下载并保存图片（带超时和流式大小限制）"""
         try:
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=self.DOWNLOAD_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url) as response:
                     if response.status != 200:
                         logger.error(f"❌ 下载图片失败，HTTP状态码: {response.status}")
                         return False
                     
-                    content_length = int(response.headers.get('Content-Length', 0))
-                    if content_length > self.max_file_size:
-                        logger.warning(f"⚠️ 图片过大 ({content_length/1024/1024:.2f}MB)，跳过: {url}")
+                    content_length = response.headers.get('Content-Length')
+                    if content_length:
+                        try:
+                            content_length = int(content_length)
+                        except (TypeError, ValueError):
+                            content_length = 0
+                        if content_length > self.max_file_size:
+                            logger.warning(f"⚠️ 图片过大 ({content_length/1024/1024:.2f}MB)，跳过: {url}")
+                            return False
+                    
+                    save_path = self._dedupe_path(save_path)
+                    size = 0
+                    f = await aiofiles.open(save_path, 'wb')
+                    try:
+                        async for chunk in response.content.iter_chunked(64 * 1024):
+                            size += len(chunk)
+                            if size > self.max_file_size:
+                                logger.warning(f"⚠️ 下载内容超过大小限制 ({self.max_file_size/1024/1024:.0f}MB)，中止: {url}")
+                                return False
+                            await f.write(chunk)
+                    finally:
+                        await f.close()
+                    
+                    if not save_path.exists() or save_path.stat().st_size == 0:
+                        logger.error(f"❌ 下载内容为空: {url}")
+                        try:
+                            save_path.unlink()
+                        except OSError:
+                            pass
                         return False
                     
-                    async with aiofiles.open(save_path, 'wb') as f:
-                        await f.write(await response.read())
-                    
-                    logger.info(f"✅ 下载并保存图片: {save_path.name} ({content_length} bytes)")
+                    logger.info(f"✅ 下载并保存图片: {save_path.name} ({size} bytes)")
                     return True
                     
+        except asyncio.TimeoutError:
+            logger.error(f"❌ 下载图片超时: {url}")
+            return False
         except Exception as e:
             logger.error(f"❌ 下载图片失败 {url}: {e}", exc_info=True)
             return False
     
     async def _save_image_from_event(self, image_id: str, save_path: Path) -> bool:
-        """通过事件对象获取图片（备用方法）"""
+        """通过事件对象获取图片（备用方法，依赖 OneBot API）"""
         try:
             logger.info(f"🔍 尝试使用平台适配器API获取图片: {image_id}")
             
-            api_url = f"http://localhost:5700/get_image?file={image_id}"
+            api_url = f"{self.ONE_BOT_API_BASE}/get_image?file={quote(image_id, safe='')}"
             
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=self.DOWNLOAD_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(api_url) as response:
                     if response.status == 200:
-                        async with aiofiles.open(save_path, 'wb') as f:
-                            await f.write(await response.read())
+                        save_path = self._dedupe_path(save_path)
+                        f = await aiofiles.open(save_path, 'wb')
+                        try:
+                            size = 0
+                            async for chunk in response.content.iter_chunked(64 * 1024):
+                                size += len(chunk)
+                                if size > self.max_file_size:
+                                    logger.warning(f"⚠️ 下载内容超过大小限制，中止: {image_id}")
+                                    return False
+                                await f.write(chunk)
+                        finally:
+                            await f.close()
                         logger.info(f"✅ 通过aiocqhttp API获取并保存图片: {save_path.name}")
                         return True
                     else:
@@ -406,27 +462,9 @@ class ImageSaver:
             logger.error(f"❌ 无法获取图片: {image_id}")
             return False
             
+        except asyncio.TimeoutError:
+            logger.error(f"❌ 通过 API 获取图片超时: {image_id}")
+            return False
         except Exception as e:
             logger.error(f"❌ 通过事件对象获取图片失败 {image_id}: {e}", exc_info=True)
-            return False
-    
-    async def _save_image_by_id(self, image_id: str, save_path: Path) -> bool:
-        """通过图片ID获取并保存图片"""
-        try:
-            api_url = f"http://localhost:3000/get_image?image_id={image_id}"
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(api_url) as response:
-                    if response.status != 200:
-                        logger.error(f"❌ 通过API获取图片失败，HTTP状态码: {response.status}")
-                        return False
-                    
-                    async with aiofiles.open(save_path, 'wb') as f:
-                        await f.write(await response.read())
-                    
-                    logger.info(f"✅ 通过API获取并保存图片: {save_path.name}")
-                    return True
-                    
-        except Exception as e:
-            logger.error(f"❌ 通过ID获取图片失败 {image_id}: {e}", exc_info=True)
             return False

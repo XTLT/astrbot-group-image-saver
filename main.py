@@ -18,10 +18,12 @@ AstrBot 插件：群聊图片自动保存器
 
 import os
 import asyncio
-import logging
+import json
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import List
+from urllib.parse import quote
 
 import aiofiles
 
@@ -36,9 +38,33 @@ from .private_filter import PrivateFilter
 from .image_saver import ImageSaver
 
 
-@register("astrbot_plugin_group_image_saver", "AstrBotHelper", "群聊图片自动保存插件", "2.7.2")
+PLUGIN_VERSION = "0.0.1"
+
+
+def _safe_message_datetime(event: AstrMessageEvent) -> datetime:
+    """安全获取消息时间（兼容毫秒时间戳与异常值）"""
+    try:
+        msg_time = getattr(event.message_obj, 'time', None)
+        if msg_time is None:
+            return datetime.now()
+        msg_time = float(msg_time)
+        if msg_time > 1e12:
+            # 毫秒时间戳归一化为秒
+            msg_time = msg_time / 1000.0
+        return datetime.fromtimestamp(msg_time)
+    except (ValueError, OverflowError, OSError, TypeError):
+        return datetime.now()
+
+
+@register("astrbot_plugin_group_image_saver", "AstrBotHelper", "群聊图片自动保存插件", PLUGIN_VERSION)
 class GroupImageSaverPlugin(Star):
     """AstrBot 群聊图片自动保存插件主类"""
+    
+    # 可通过命令动态修改并需要持久化的配置项
+    RUNTIME_CONFIG_KEYS = [
+        "group_filter_mode", "group_whitelist", "group_blacklist",
+        "private_filter_mode", "private_whitelist", "private_blacklist",
+    ]
     
     def __init__(self, context: Context, config: dict):
         """初始化插件 - 使用正确的构造函数签名"""
@@ -87,12 +113,13 @@ class GroupImageSaverPlugin(Star):
             if key not in self.config:
                 self.config[key] = value
         
+        self._load_runtime_config()
+        
         logger.info(f"🔧 插件配置: {self.config}")
         
         self.image_saver = ImageSaver(self.config)
         
         self.warning_group = str(self.config.get("warning_group", "")).strip()
-        self.warning_sent = False
         
         self.stats = {
             'total_images': 0,
@@ -102,12 +129,54 @@ class GroupImageSaverPlugin(Star):
             'last_save_time': None
         }
         
-        logger.info(f"🚀 群聊图片自动保存插件 v2.6.0 已加载")
+        logger.info(f"🚀 群聊图片自动保存插件 v{PLUGIN_VERSION} 已加载")
         
         if (self.image_saver.path_status.get("fallback", False) and 
             self.warning_group and 
             not self.warning_sent):
             asyncio.create_task(self.send_warning_message())
+    
+    @property
+    def _runtime_config_path(self) -> Path:
+        """运行时过滤配置的本地持久化文件（AstrBot 配置系统不可用时的兜底）"""
+        return Path(__file__).parent / "data" / "runtime_config.json"
+    
+    def _load_runtime_config(self):
+        """加载运行时持久化的过滤配置"""
+        try:
+            if self._runtime_config_path.exists():
+                data = json.loads(self._runtime_config_path.read_text(encoding="utf-8"))
+                for key in self.RUNTIME_CONFIG_KEYS:
+                    if key in data and data[key] is not None:
+                        self.config[key] = data[key]
+                logger.info(f"📂 已加载运行时过滤配置: {self._runtime_config_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ 加载运行时配置失败: {e}")
+    
+    def _persist_config(self):
+        """持久化当前过滤配置（优先 AstrBot 配置系统，失败则写入本地 JSON）"""
+        try:
+            if hasattr(self.config, 'save_config'):
+                self.config.save_config()
+                logger.info("💾 过滤配置已通过 AstrBot 配置系统保存")
+                return
+            data = {key: self.config.get(key) for key in self.RUNTIME_CONFIG_KEYS}
+            self._runtime_config_path.parent.mkdir(parents=True, exist_ok=True)
+            self._runtime_config_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            logger.info(f"💾 过滤配置已持久化到: {self._runtime_config_path}")
+        except Exception as e:
+            logger.error(f"❌ 保存配置失败: {e}")
+    
+    def _is_platform_supported(self, event: AstrMessageEvent) -> bool:
+        """检查当前消息平台是否在支持列表中"""
+        platform = getattr(event, 'platform', None)
+        platform_str = platform.name if hasattr(platform, 'name') else str(platform)
+        if platform_str.upper() not in self.image_saver.supported_platforms:
+            logger.debug(f"⏭️ 平台 {platform_str} 不在支持列表，跳过图片保存")
+            return False
+        return True
     
     async def send_warning_message(self):
         """发送路径回退警告到指定群"""
@@ -151,13 +220,14 @@ class GroupImageSaverPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
         """监听所有群消息，提取并保存图片"""
+        if not self._is_platform_supported(event):
+            return
+        
         group_id = str(event.message_obj.group_id)
         
         if not self.image_saver.group_filter.is_group_allowed(group_id):
             self.stats['filtered_groups'] += 1
-            
-            if logger.level <= logging.DEBUG:
-                logger.debug(f"⏭️ 群组 {group_id} 被过滤，跳过图片保存")
+            logger.debug(f"⏭️ 群组 {group_id} 被过滤，跳过图片保存")
             return
         
         if (group_id == self.warning_group and 
@@ -218,8 +288,7 @@ class GroupImageSaverPlugin(Star):
                 logger.warning(f"⚠️ 图片组件 {idx} 的 file 属性为空")
                 continue
             
-            msg_time = event.message_obj.time if hasattr(event.message_obj, 'time') else datetime.now().timestamp()
-            msg_datetime = datetime.fromtimestamp(msg_time)
+            msg_datetime = _safe_message_datetime(event)
             filename = msg_datetime.strftime("%Y%m%d_%H%M%S")
             filename += f"_{idx}"
             if isinstance(file_source, str) and '.' in file_source:
@@ -231,36 +300,36 @@ class GroupImageSaverPlugin(Star):
             else:
                 filename += '.jpg'
             
-            logger.info(f"💾 图片 {idx} 将保存为: {filename}")
+            # 自动处理同名文件，避免覆盖已保存的图片
+            save_path = self.image_saver._dedupe_path(save_dir / filename)
+            
+            logger.info(f"💾 图片 {idx} 将保存为: {save_path.name}")
             
             try:
                 success = False
                 
                 if hasattr(img_comp, 'data') and img_comp.data:
-                    logger.info(f"🔍 尝试直接从消息组件获取图片数据")
-                    async with aiofiles.open(save_dir / filename, 'wb') as f:
-                        await f.write(img_comp.data)
-                    logger.info(f"✅ 直接从消息组件保存图片: {filename}")
-                    success = True
+                    logger.info("🔍 尝试直接从消息组件获取图片数据")
+                    success = await self.image_saver.save_image(img_comp.data, save_path.parent, save_path.name)
                 
-                elif hasattr(img_comp, 'url') and img_comp.url:
+                if not success and hasattr(img_comp, 'url') and img_comp.url:
                     logger.info(f"🔍 尝试从图片URL下载: {img_comp.url}")
-                    success = await self.image_saver._save_url_image(img_comp.url, save_dir / filename)
+                    success = await self.image_saver._save_url_image(img_comp.url, save_path)
                 
-                elif not success:
+                if not success:
                     logger.info(f"🔍 尝试使用平台适配器API获取图片: {file_source}")
-                    success = await self.image_saver._save_image_from_event(file_source, save_dir / filename)
+                    success = await self.image_saver._save_image_from_event(file_source, save_path)
                 
-                elif not success and hasattr(event, 'raw_message'):
-                    logger.info(f"🔍 尝试从原始消息中提取图片URL")
+                if not success and hasattr(event, 'raw_message') and event.raw_message:
+                    logger.info("🔍 尝试从原始消息中提取图片URL")
                     cq_image_match = re.search(r'\[CQ:image,file=(.*?)\]', event.raw_message)
                     if cq_image_match:
                         cq_file = cq_image_match.group(1)
                         if cq_file.startswith('http'):
-                            success = await self.image_saver._save_url_image(cq_file, save_dir / filename)
+                            success = await self.image_saver._save_url_image(cq_file, save_path)
                         else:
-                            image_url = f"http://localhost:5700/get_image?file={cq_file}"
-                            success = await self.image_saver._save_url_image(image_url, save_dir / filename)
+                            image_url = f"{self.image_saver.ONE_BOT_API_BASE}/get_image?file={quote(cq_file, safe='')}"
+                            success = await self.image_saver._save_url_image(image_url, save_path)
             except Exception as e:
                 logger.error(f"❌ 保存图片时发生异常: {e}")
                 success = False
@@ -270,14 +339,13 @@ class GroupImageSaverPlugin(Star):
                 self.stats['successful_saves'] += 1
                 saved_count += 1
                 
-                full_path = save_dir / filename
+                full_path = save_path
                 if full_path.exists():
                     file_size = full_path.stat().st_size
                     logger.info(f"✅ 图片 {idx} 保存成功: {full_path} ({file_size} bytes)")
                     logger.info(f"📁 绝对路径: {full_path.absolute()}")
                     logger.info(f"📋 文件存在性检查: {full_path.exists()}")
                     try:
-                        import stat
                         file_stat = os.stat(full_path)
                         logger.info(f"🔐 文件权限: {oct(file_stat.st_mode)[-3:]}")
                     except:
@@ -289,7 +357,7 @@ class GroupImageSaverPlugin(Star):
                         pass
                 else:
                     logger.error(f"❌ 图片保存后文件不存在: {full_path}")
-                    self.stats['successful_saves'] -= 1
+                    self.stats['successful_saves'] = max(0, self.stats['successful_saves'] - 1)
                     self.stats['failed_saves'] += 1
             else:
                 self.stats['failed_saves'] += 1
@@ -315,6 +383,9 @@ class GroupImageSaverPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     async def on_private_message(self, event: AstrMessageEvent):
         """监听所有好友消息，提取并保存图片"""
+        if not self._is_platform_supported(event):
+            return
+        
         try:
             if hasattr(event.message_obj, 'user_id'):
                 user_id = str(event.message_obj.user_id)
@@ -341,8 +412,7 @@ class GroupImageSaverPlugin(Star):
             return
         
         if not self.image_saver.private_filter.is_user_allowed(user_id):
-            if logger.level <= logging.DEBUG:
-                logger.debug(f"⏭️ 好友 {user_id} 被过滤，跳过图片保存")
+            logger.debug(f"⏭️ 好友 {user_id} 被过滤，跳过图片保存")
             return
         
         image_components: List[Comp.Image] = [
@@ -372,8 +442,7 @@ class GroupImageSaverPlugin(Star):
                 logger.warning(f"⚠️ 图片组件 {idx} 的 file 属性为空")
                 continue
             
-            msg_time = event.message_obj.time if hasattr(event.message_obj, 'time') else datetime.now().timestamp()
-            msg_datetime = datetime.fromtimestamp(msg_time)
+            msg_datetime = _safe_message_datetime(event)
             filename = msg_datetime.strftime("%Y%m%d_%H%M%S")
             filename += f"_{idx}"
             if isinstance(file_source, str) and '.' in file_source:
@@ -385,36 +454,36 @@ class GroupImageSaverPlugin(Star):
             else:
                 filename += '.jpg'
             
-            logger.info(f"💾 图片 {idx} 将保存为: {filename}")
+            # 自动处理同名文件，避免覆盖已保存的图片
+            save_path = self.image_saver._dedupe_path(save_dir / filename)
+            
+            logger.info(f"💾 图片 {idx} 将保存为: {save_path.name}")
             
             try:
                 success = False
                 
                 if hasattr(img_comp, 'data') and img_comp.data:
-                    logger.info(f"🔍 尝试直接从消息组件获取图片数据")
-                    async with aiofiles.open(save_dir / filename, 'wb') as f:
-                        await f.write(img_comp.data)
-                    logger.info(f"✅ 直接从消息组件保存图片: {filename}")
-                    success = True
+                    logger.info("🔍 尝试直接从消息组件获取图片数据")
+                    success = await self.image_saver.save_image(img_comp.data, save_path.parent, save_path.name)
                 
-                elif hasattr(img_comp, 'url') and img_comp.url:
+                if not success and hasattr(img_comp, 'url') and img_comp.url:
                     logger.info(f"🔍 尝试从图片URL下载: {img_comp.url}")
-                    success = await self.image_saver._save_url_image(img_comp.url, save_dir / filename)
+                    success = await self.image_saver._save_url_image(img_comp.url, save_path)
                 
-                elif not success:
+                if not success:
                     logger.info(f"🔍 尝试使用平台适配器API获取图片: {file_source}")
-                    success = await self.image_saver._save_image_from_event(file_source, save_dir / filename)
+                    success = await self.image_saver._save_image_from_event(file_source, save_path)
                 
-                elif not success and hasattr(event, 'raw_message'):
-                    logger.info(f"🔍 尝试从原始消息中提取图片URL")
+                if not success and hasattr(event, 'raw_message') and event.raw_message:
+                    logger.info("🔍 尝试从原始消息中提取图片URL")
                     cq_image_match = re.search(r'\[CQ:image,file=(.*?)\]', event.raw_message)
                     if cq_image_match:
                         cq_file = cq_image_match.group(1)
                         if cq_file.startswith('http'):
-                            success = await self.image_saver._save_url_image(cq_file, save_dir / filename)
+                            success = await self.image_saver._save_url_image(cq_file, save_path)
                         else:
-                            image_url = f"http://localhost:5700/get_image?file={cq_file}"
-                            success = await self.image_saver._save_url_image(image_url, save_dir / filename)
+                            image_url = f"{self.image_saver.ONE_BOT_API_BASE}/get_image?file={quote(cq_file, safe='')}"
+                            success = await self.image_saver._save_url_image(image_url, save_path)
             except Exception as e:
                 logger.error(f"❌ 保存图片时发生异常: {e}")
                 success = False
@@ -424,14 +493,14 @@ class GroupImageSaverPlugin(Star):
                 self.stats['successful_saves'] += 1
                 saved_count += 1
                 
-                full_path = save_dir / filename
+                full_path = save_path
                 if full_path.exists():
                     file_size = full_path.stat().st_size
                     logger.info(f"✅ 图片 {idx} 保存成功: {full_path} ({file_size} bytes)")
                     logger.info(f"📁 绝对路径: {full_path.absolute()}")
                 else:
                     logger.error(f"❌ 图片保存后文件不存在: {full_path}")
-                    self.stats['successful_saves'] -= 1
+                    self.stats['successful_saves'] = max(0, self.stats['successful_saves'] - 1)
                     self.stats['failed_saves'] += 1
             else:
                 self.stats['failed_saves'] += 1
@@ -559,7 +628,7 @@ class GroupImageSaverPlugin(Star):
         try:
             test_dir.mkdir(parents=True, exist_ok=True)
             
-            test_content = f"测试时间: {datetime.now().isoformat()}\n插件版本: 2.6.0\n"
+            test_content = f"测试时间: {datetime.now().isoformat()}\n插件版本: {PLUGIN_VERSION}\n"
             test_file.write_text(test_content)
             
             if test_file.exists():
@@ -730,6 +799,8 @@ class GroupImageSaverPlugin(Star):
             
             self.config["group_filter_mode"] = mode
             self.image_saver.group_filter = GroupFilter(self.config)
+            group_filter = self.image_saver.group_filter
+            self._persist_config()
             
             result = f"✅ 已设置群组过滤模式为：{mode}"
             if mode == "whitelist":
@@ -759,6 +830,7 @@ class GroupImageSaverPlugin(Star):
                     if group_id not in [str(g) for g in self.config["group_whitelist"]]:
                         self.config["group_whitelist"].append(group_id)
                     
+                    self._persist_config()
                     yield event.plain_result(f"✅ 群组 {group_id} 已添加到白名单")
                 else:
                     yield event.plain_result(f"⚠️ 群组 {group_id} 已在白名单中")
@@ -776,6 +848,7 @@ class GroupImageSaverPlugin(Star):
                             if str(g) != group_id
                         ]
                     
+                    self._persist_config()
                     yield event.plain_result(f"✅ 群组 {group_id} 已从白名单移除")
                 else:
                     yield event.plain_result(f"⚠️ 群组 {group_id} 不在白名单中")
@@ -813,6 +886,7 @@ class GroupImageSaverPlugin(Star):
                     if group_id not in [str(g) for g in self.config["group_blacklist"]]:
                         self.config["group_blacklist"].append(group_id)
                     
+                    self._persist_config()
                     yield event.plain_result(f"✅ 群组 {group_id} 已添加到黑名单")
                 else:
                     yield event.plain_result(f"⚠️ 群组 {group_id} 已在黑名单中")
@@ -830,6 +904,7 @@ class GroupImageSaverPlugin(Star):
                             if str(g) != group_id
                         ]
                     
+                    self._persist_config()
                     yield event.plain_result(f"✅ 群组 {group_id} 已从黑名单移除")
                 else:
                     yield event.plain_result(f"⚠️ 群组 {group_id} 不在黑名单中")
@@ -906,6 +981,8 @@ class GroupImageSaverPlugin(Star):
             
             self.config["private_filter_mode"] = mode
             self.image_saver.private_filter = PrivateFilter(self.config)
+            private_filter = self.image_saver.private_filter
+            self._persist_config()
             
             result = f"✅ 已设置好友过滤模式为：{mode}"
             if mode == "whitelist":
@@ -935,6 +1012,7 @@ class GroupImageSaverPlugin(Star):
                     if user_id not in [str(u) for u in self.config["private_whitelist"]]:
                         self.config["private_whitelist"].append(user_id)
                     
+                    self._persist_config()
                     yield event.plain_result(f"✅ 好友 {user_id} 已添加到白名单")
                 else:
                     yield event.plain_result(f"⚠️ 好友 {user_id} 已在白名单中")
@@ -952,6 +1030,7 @@ class GroupImageSaverPlugin(Star):
                             if str(u) != user_id
                         ]
                     
+                    self._persist_config()
                     yield event.plain_result(f"✅ 好友 {user_id} 已从白名单移除")
                 else:
                     yield event.plain_result(f"⚠️ 好友 {user_id} 不在白名单中")
@@ -989,6 +1068,7 @@ class GroupImageSaverPlugin(Star):
                     if user_id not in [str(u) for u in self.config["private_blacklist"]]:
                         self.config["private_blacklist"].append(user_id)
                     
+                    self._persist_config()
                     yield event.plain_result(f"✅ 好友 {user_id} 已添加到黑名单")
                 else:
                     yield event.plain_result(f"⚠️ 好友 {user_id} 已在黑名单中")
@@ -1006,6 +1086,7 @@ class GroupImageSaverPlugin(Star):
                             if str(u) != user_id
                         ]
                     
+                    self._persist_config()
                     yield event.plain_result(f"✅ 好友 {user_id} 已从黑名单移除")
                 else:
                     yield event.plain_result(f"⚠️ 好友 {user_id} 不在黑名单中")
