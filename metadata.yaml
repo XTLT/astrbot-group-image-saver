@@ -1,8 +1,8 @@
-name: astrbot_plugin_group_image_saver名称: astrbot_plugin_group_image_saver
-display_name: 群聊图片自动保存显示名称: 群聊图片自动保存
-short_desc: 自动保存群聊图片，按群号/日期归档，支持备注与自动询问备注简短描述: 自动保存群聊图片，按群号/日期归档，支持备注与自动询问备注
+name: astrbot_plugin_group_image_saver
+display_name: 群聊图片自动保存
+short_desc: 自动保存群聊图片，按群号/日期归档，支持备注与自动询问备注
 desc: 自动保存群聊和好友发送的图片，支持备注功能、按群号和日期分类归档、群组/好友白名单黑名单过滤和路径警告
-version: 0.1.2版本: 0.1.2
-author: tension作者: : 张力作者: : 作者: AstrBotHelper作者: AstrBotHelper
-repo: https://github.com/XTLT/astrbot-group-image-saver仓库: https://github.com/XTLT/astrbot-group-image-saver
-tags: ["qq", "image", "save"“保存”, "backup"“备份”“备份”, "notes"“备注”“备注”“备注”]标签: ["qq", "image", "save", "backup", "notes"]
+version: 0.1.2
+author: tension
+repo: https://github.com/XTLT/astrbot-group-image-saver
+tags: ["qq", "image", "save", "backup", "notes"]
