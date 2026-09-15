@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 AstrBot 插件：群聊图片自动保存器
-版本: 0.1.0
+版本: 0.1.2
 
 功能：
 1. 自动保存群聊中发送的图片
@@ -16,12 +16,14 @@ AstrBot 插件：群聊图片自动保存器
 9. 路径未挂载时发送警告到指定群
 10. 支持图片备注（单图备注入文件名，多图备注写入txt）
 11. 多来源取图（消息数据/组件文件转换/URL/API/CQ码）
+12. 自动询问备注：图片无备注时在群里询问发送者，等待文字补充备注
 """
 
 import os
 import asyncio
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -40,7 +42,7 @@ from .private_filter import PrivateFilter
 from .image_saver import ImageSaver
 
 
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.2"
 
 
 def _safe_message_datetime(event: AstrMessageEvent) -> datetime:
@@ -109,7 +111,9 @@ class GroupImageSaverPlugin(Star):
             "private_filter_mode": "all",
             "private_whitelist": [],
             "private_blacklist": [],
-            "save_notes": True
+            "save_notes": True,
+            "prompt_for_notes": True,
+            "note_prompt_timeout": 60
         }
         
         for key, value in default_config.items():
@@ -123,6 +127,14 @@ class GroupImageSaverPlugin(Star):
         self.image_saver = ImageSaver(self.config)
         
         self.warning_group = str(self.config.get("warning_group", "")).strip()
+
+        # 自动询问备注：待备注状态表 {(群号, 发送者ID): {"expires": 时间戳, "paths": [保存路径]}}
+        self._pending_note = {}
+        self.prompt_for_notes = bool(self.config.get("prompt_for_notes", True))
+        try:
+            self.note_prompt_timeout = max(10, int(self.config.get("note_prompt_timeout", 60)))
+        except (TypeError, ValueError):
+            self.note_prompt_timeout = 60
         
         self.stats = {
             'total_images': 0,
@@ -182,7 +194,7 @@ class GroupImageSaverPlugin(Star):
         return True
     
     def _get_notes(self, event: AstrMessageEvent) -> str:
-        """从消息额外信息中获取备注"""
+        """获取备注：优先消息额外信息的 notes 字段，其次取图片消息附带的纯文字"""
         try:
             get_extra = getattr(event, 'get_extra', None)
             if callable(get_extra):
@@ -191,7 +203,47 @@ class GroupImageSaverPlugin(Star):
                     return str(notes).strip()
         except Exception:
             pass
-        return ""
+
+        # 回退：从消息链中提取纯文本作为备注（图片消息附带的文字）
+        note = self._get_text_content(event)
+        if not note:
+            return ""
+        # 以 / 开头的文本视为命令，不作为备注
+        if note.startswith("/"):
+            return ""
+        logger.debug(f"📝 备注回退：使用消息文字作为备注: {note[:30]}")
+        return note
+
+    def _get_text_content(self, event: AstrMessageEvent) -> str:
+        """提取消息链中的纯文字内容"""
+        try:
+            parts = []
+            for seg in event.get_messages():
+                if isinstance(seg, Comp.Plain):
+                    text = str(getattr(seg, 'text', '') or '').strip()
+                    if text:
+                        parts.append(text)
+            return " ".join(parts).strip()
+        except Exception:
+            return ""
+
+    def _get_sender_id(self, event: AstrMessageEvent) -> str:
+        """获取消息发送者ID（优先官方API，兼容多种字段）"""
+        try:
+            sid = event.get_sender_id()
+            if sid:
+                return str(sid)
+        except Exception:
+            pass
+        try:
+            message_obj = getattr(event, 'message_obj', None)
+            for attr in ("user_id", "sender_id", "from_id"):
+                v = getattr(message_obj, attr, None)
+                if v is not None:
+                    return str(v)
+        except Exception:
+            pass
+        return "unknown"
     
     def _apply_notes(self, saved_paths: List[Path], notes: str):
         """将备注应用到已保存的图片：单图追加到文件名，多图写入备注txt"""
@@ -202,7 +254,12 @@ class GroupImageSaverPlugin(Star):
             
             if len(saved_paths) == 1:
                 path = saved_paths[0]
-                new_name = f"{path.stem}_{notes}{path.suffix}"
+                safe_notes = re.sub(r'[\\/:*?"<>|\s]+', '_', notes).strip('_')
+                if len(safe_notes) > 30:
+                    safe_notes = safe_notes[:30].rstrip('_')
+                if not safe_notes:
+                    safe_notes = "备注"
+                new_name = f"{path.stem}_{safe_notes}{path.suffix}"
                 new_path = self.image_saver._dedupe_path(path.parent / new_name)
                 path.rename(new_path)
                 logger.info(f"📝 已为单张图片添加备注: {new_path.name}")
@@ -271,6 +328,28 @@ class GroupImageSaverPlugin(Star):
             self.stats['filtered_groups'] += 1
             logger.debug(f"⏭️ 群组 {group_id} 被过滤，跳过图片保存")
             return
+
+        # 自动备注询问：匹配同群同发送者的下一条文字消息
+        if self.prompt_for_notes and self._pending_note:
+            pending_key = (group_id, self._get_sender_id(event))
+            pending = self._pending_note.get(pending_key)
+            if pending:
+                if time.time() > pending.get("expires", 0):
+                    self._pending_note.pop(pending_key, None)
+                    logger.info("⏰ 备注询问超时，已取消待备注关联")
+                else:
+                    reply_text = self._get_text_content(event)
+                    if reply_text and not reply_text.startswith("/"):
+                        self._pending_note.pop(pending_key, None)
+                        pending_paths = pending.get("paths", [])
+                        if pending_paths:
+                            self._apply_notes(pending_paths, reply_text)
+                            yield event.plain_result(
+                                f"✅ 已为 {len(pending_paths)} 张图片添加备注：{reply_text}"
+                            )
+                        logger.info(
+                            f"📝 收到备注文字「{reply_text}」，已关联 {len(pending_paths)} 张图片"
+                        )
         
         if (group_id == self.warning_group and 
             self.image_saver.path_status.get("fallback", False) and 
@@ -422,6 +501,24 @@ class GroupImageSaverPlugin(Star):
             notes = self._get_notes(event)
             if notes and saved_paths:
                 self._apply_notes(saved_paths, notes)
+            elif self.prompt_for_notes and saved_paths:
+                # 无备注 → 自动询问发送者
+                pending_key = (group_id, self._get_sender_id(event))
+                existing = self._pending_note.get(pending_key)
+                paths = saved_paths
+                if existing and time.time() <= existing.get("expires", 0):
+                    paths = existing.get("paths", []) + saved_paths
+                self._pending_note[pending_key] = {
+                    "expires": time.time() + self.note_prompt_timeout,
+                    "paths": paths,
+                }
+                total = len(paths)
+                yield event.plain_result(
+                    f"📸 已保存 {total} 张图片，需要备注吗？请在 {self.note_prompt_timeout} 秒内发送文字，我会把它作为这组图片的备注。"
+                )
+                logger.info(
+                    f"💬 已保存 {total} 张图片（无备注），已询问发送者 {pending_key[1]}（群 {pending_key[0]}）"
+                )
         
         self.stats['last_save_time'] = datetime.now().isoformat()
         
@@ -749,6 +846,7 @@ class GroupImageSaverPlugin(Star):
 过滤模式: {self.config.get('group_filter_mode', 'all')}
 警告群号: {self.warning_group or '未配置'}
 备注功能: {self.config.get('save_notes', True)}
+备注询问: {self.config.get('prompt_for_notes', True)} (等待 {self.config.get('note_prompt_timeout', 60)} 秒)
 
 📈 当前统计:
 检测图片: {self.stats['total_images']}
@@ -813,6 +911,7 @@ class GroupImageSaverPlugin(Star):
 好友图片保存: {self.config.get('save_private_images', True)}
 好友过滤模式: {self.config.get('private_filter_mode', 'all')}
 备注功能: {self.config.get('save_notes', True)}
+备注询问: {self.config.get('prompt_for_notes', True)} (等待 {self.config.get('note_prompt_timeout', 60)} 秒)
 
 💡 使用命令:
 /imgsave_config - 显示详细配置和路径状态
