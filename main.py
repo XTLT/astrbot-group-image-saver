@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 AstrBot 插件：群聊图片自动保存器
-版本: 0.1.2
+版本: 0.1.3
 
 功能：
 1. 自动保存群聊中发送的图片
@@ -42,7 +42,7 @@ from .private_filter import PrivateFilter
 from .image_saver import ImageSaver
 
 
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 
 
 def _safe_message_datetime(event: AstrMessageEvent) -> datetime:
