@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-群聊图片自动保存插件测试脚本
+聊天图片自动保存插件测试脚本
 （合并自 astrbot_plugin_qq_auto_save_images 的测试框架）
 """
 
@@ -74,7 +74,7 @@ def test_file_structure():
 def main():
     """运行所有测试"""
     print("=" * 50)
-    print("群聊图片自动保存插件 - 测试脚本")
+    print("聊天图片自动保存插件 - 测试脚本")
     print("=" * 50)
 
     tests = [

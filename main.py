@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AstrBot 插件：群聊图片自动保存器
+AstrBot 插件：聊天图片自动保存器
 版本: 0.1.4
 
 功能：
@@ -60,9 +60,9 @@ def _safe_message_datetime(event: AstrMessageEvent) -> datetime:
         return datetime.now()
 
 
-@register("astrbot_plugin_group_image_saver", "AstrBotHelper", "群聊图片自动保存插件", PLUGIN_VERSION)
+@register("astrbot_plugin_group_image_saver", "AstrBotHelper", "聊天图片自动保存", PLUGIN_VERSION)
 class GroupImageSaverPlugin(Star):
-    """AstrBot 群聊图片自动保存插件主类"""
+    """AstrBot 聊天图片自动保存插件主类"""
     
     # 可通过命令动态修改并需要持久化的配置项
     RUNTIME_CONFIG_KEYS = [
@@ -145,7 +145,7 @@ class GroupImageSaverPlugin(Star):
             'last_save_time': None
         }
         
-        logger.info(f"🚀 群聊图片自动保存插件 v{PLUGIN_VERSION} 已加载")
+        logger.info(f"🚀 聊天图片自动保存插件 v{PLUGIN_VERSION} 已加载")
         
         if (self.image_saver.path_status.get("fallback", False) and 
             self.warning_group and 
@@ -1303,5 +1303,5 @@ class GroupImageSaverPlugin(Star):
     
     async def terminate(self):
         """插件卸载时调用"""
-        logger.info("👋 群聊图片自动保存插件已卸载")
+        logger.info("👋 聊天图片自动保存插件已卸载")
         logger.info(f"📈 最终统计: {self.stats}")
