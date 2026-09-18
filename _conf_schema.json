@@ -14,6 +14,11 @@
     "default": 50,
     "description": "单张图片最大大小限制（MB）"
   },
+  "one_bot_api_base": {
+    "type": "string",
+    "default": "http://localhost:5700",
+    "description": "OneBot/aiocqhttp HTTP API 地址（仅 OneBot 系平台备用取图使用）。容器部署时请填 astrbot 能访问到的地址，如 http://<宿主机IP>:5700"
+  },
   "save_to_log": {
     "type": "bool",
     "default": true,

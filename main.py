@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 AstrBot 插件：群聊图片自动保存器
-版本: 0.1.3
+版本: 0.1.4
 
 功能：
 1. 自动保存群聊中发送的图片
@@ -42,7 +42,7 @@ from .private_filter import PrivateFilter
 from .image_saver import ImageSaver
 
 
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 
 
 def _safe_message_datetime(event: AstrMessageEvent) -> datetime:
@@ -103,6 +103,7 @@ class GroupImageSaverPlugin(Star):
             "max_file_size_mb": 50,
             "save_to_log": True,
             "supported_platforms": ["AIOCQHTTP"],
+            "one_bot_api_base": "http://localhost:5700",
             "group_filter_mode": "all",
             "group_whitelist": [],
             "group_blacklist": [],
@@ -192,6 +193,12 @@ class GroupImageSaverPlugin(Star):
             logger.debug(f"⏭️ 平台 {platform_str} 不在支持列表，跳过图片保存")
             return False
         return True
+    
+    def _is_onebot_platform(self, event: AstrMessageEvent) -> bool:
+        """检查当前消息平台是否为 OneBot 系（可使用 /get_image 备用取图）"""
+        platform = getattr(event, 'platform', None)
+        platform_str = platform.name if hasattr(platform, 'name') else str(platform)
+        return platform_str.upper() in self.image_saver.ONE_BOT_PLATFORMS
     
     def _get_notes(self, event: AstrMessageEvent) -> str:
         """获取备注：优先消息额外信息的 notes 字段，其次取图片消息附带的纯文字"""
@@ -445,12 +452,14 @@ class GroupImageSaverPlugin(Star):
                         logger.debug(f"消息组件文件转换失败: {e}")
                 
                 if not success and hasattr(img_comp, 'url') and img_comp.url:
-                    logger.info(f"🔍 尝试从图片URL下载: {img_comp.url}")
-                    success = await self.image_saver._save_url_image(img_comp.url, save_path)
+                    logger.info(f"🔍 尝试从图片URL/路径获取图片: {img_comp.url}")
+                    success = await self.image_saver.save_image(img_comp.url, save_path.parent, save_path.name)
                 
-                if not success:
+                if not success and self._is_onebot_platform(event):
                     logger.info(f"🔍 尝试使用平台适配器API获取图片: {file_source}")
                     success = await self.image_saver._save_image_from_event(file_source, save_path)
+                elif not success:
+                    logger.info(f"🔍 跳过平台适配器API备用取图（非OneBot平台）: {file_source}")
                 
                 if not success and hasattr(event, 'raw_message') and event.raw_message:
                     logger.info("🔍 尝试从原始消息中提取图片URL")
@@ -459,9 +468,11 @@ class GroupImageSaverPlugin(Star):
                         cq_file = cq_image_match.group(1)
                         if cq_file.startswith('http'):
                             success = await self.image_saver._save_url_image(cq_file, save_path)
-                        else:
-                            image_url = f"{self.image_saver.ONE_BOT_API_BASE}/get_image?file={quote(cq_file, safe='')}"
+                        elif self._is_onebot_platform(event):
+                            image_url = f"{self.image_saver.one_bot_api_base}/get_image?file={quote(cq_file, safe='')}"
                             success = await self.image_saver._save_url_image(image_url, save_path)
+                        else:
+                            logger.info(f"🔍 跳过CQ码OneBot取图（非OneBot平台）: {cq_file}")
             except Exception as e:
                 logger.error(f"❌ 保存图片时发生异常: {e}")
                 success = False
@@ -635,12 +646,14 @@ class GroupImageSaverPlugin(Star):
                         logger.debug(f"消息组件文件转换失败: {e}")
                 
                 if not success and hasattr(img_comp, 'url') and img_comp.url:
-                    logger.info(f"🔍 尝试从图片URL下载: {img_comp.url}")
-                    success = await self.image_saver._save_url_image(img_comp.url, save_path)
+                    logger.info(f"🔍 尝试从图片URL/路径获取图片: {img_comp.url}")
+                    success = await self.image_saver.save_image(img_comp.url, save_path.parent, save_path.name)
                 
-                if not success:
+                if not success and self._is_onebot_platform(event):
                     logger.info(f"🔍 尝试使用平台适配器API获取图片: {file_source}")
                     success = await self.image_saver._save_image_from_event(file_source, save_path)
+                elif not success:
+                    logger.info(f"🔍 跳过平台适配器API备用取图（非OneBot平台）: {file_source}")
                 
                 if not success and hasattr(event, 'raw_message') and event.raw_message:
                     logger.info("🔍 尝试从原始消息中提取图片URL")
@@ -649,9 +662,11 @@ class GroupImageSaverPlugin(Star):
                         cq_file = cq_image_match.group(1)
                         if cq_file.startswith('http'):
                             success = await self.image_saver._save_url_image(cq_file, save_path)
-                        else:
-                            image_url = f"{self.image_saver.ONE_BOT_API_BASE}/get_image?file={quote(cq_file, safe='')}"
+                        elif self._is_onebot_platform(event):
+                            image_url = f"{self.image_saver.one_bot_api_base}/get_image?file={quote(cq_file, safe='')}"
                             success = await self.image_saver._save_url_image(image_url, save_path)
+                        else:
+                            logger.info(f"🔍 跳过CQ码OneBot取图（非OneBot平台）: {cq_file}")
             except Exception as e:
                 logger.error(f"❌ 保存图片时发生异常: {e}")
                 success = False

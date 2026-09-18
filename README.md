@@ -56,6 +56,8 @@ save_by_group true 是否按群号分子文件夹
 
 max_file_size_mb 50 单张图片最大大小（MB）
 
+one_bot_api_base http://localhost:5700 OneBot/aiocqhttp HTTP API 地址（仅 OneBot 系平台备用取图使用）。容器部署时请填 astrbot 能访问到的地址，如 http://<宿主机IP>:5700
+
 save_to_log true 是否记录保存日志
 
 supported_platforms ["AIOCQHTTP"] 支持的平台（其他平台需自行验证）

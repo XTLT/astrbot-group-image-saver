@@ -18,8 +18,9 @@ class ImageSaver:
     
     IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.ico', '.tiff'}
 
-    # OneBot (aiocqhttp) 图片获取 API 地址；仅 OneBot 系平台可用
-    ONE_BOT_API_BASE = "http://localhost:5700"
+    # OneBot (aiocqhttp) 图片获取 API 地址默认值；仅 OneBot 系平台可用，可通过配置 one_bot_api_base 覆盖
+    DEFAULT_ONE_BOT_API_BASE = "http://localhost:5700"
+    ONE_BOT_PLATFORMS = {"AIOCQHTTP"}
 
     # 网络图片下载超时时间（秒）
     DOWNLOAD_TIMEOUT_SECONDS = 30
@@ -43,6 +44,10 @@ class ImageSaver:
             for platform in config.get("supported_platforms", ["AIOCQHTTP"])
         )
         
+        self.one_bot_api_base = str(
+            config.get("one_bot_api_base", self.DEFAULT_ONE_BOT_API_BASE)
+        ).rstrip('/')
+        
         self.group_filter = GroupFilter(config)
         self.private_filter = PrivateFilter(config)
         
@@ -55,6 +60,7 @@ class ImageSaver:
         logger.info(f"📊 群组过滤模式: {self.group_filter.mode}")
         logger.info(f"📊 好友过滤模式: {self.private_filter.mode}")
         logger.info(f"📊 支持平台: {', '.join(sorted(self.supported_platforms))}")
+        logger.info(f"🔌 OneBot API 地址: {self.one_bot_api_base}")
         
         if not self.path_status.get("is_mounted", False):
             logger.warning(f"⚠️ 警告：路径未挂载到宿主机，容器重启后数据将丢失！")
@@ -332,8 +338,11 @@ class ImageSaver:
                             return True
                     except:
                         pass
-                    logger.info(f"🔍 文件路径处理失败，尝试使用aiocqhttp API: {file_source}")
-                    return await self._save_image_from_event(file_source, save_path)
+                    logger.info(f"🔍 文件路径处理失败，尝试使用平台适配器API备用取图: {file_source}")
+                    if self.supported_platforms & self.ONE_BOT_PLATFORMS:
+                        return await self._save_image_from_event(file_source, save_path)
+                    logger.warning(f"⚠️ 当前平台不支持OneBot API备用取图，放弃: {file_source}")
+                    return False
             elif isinstance(file_source, bytes):
                 if len(file_source) > self.max_file_size:
                     logger.warning(f"⚠️ 二进制数据过大 ({len(file_source)/1024/1024:.2f}MB)，跳过")
@@ -352,37 +361,83 @@ class ImageSaver:
             return False
     
     async def _save_local_file(self, file_path: str, save_path: Path) -> bool:
-        """保存本地文件"""
+        """保存本地文件
+
+        修复要点：
+        1. 复制前先等待源文件大小稳定，避免适配器仍在写入临时文件时读到半截内容
+        2. 写后校验使用实际写入的字节数 len(file_data)，而不是“写前快照”，消除竞态误判
+        3. 校验失败或异常时清理残留文件，避免同名文件不断累积（_0、_0_1、_0_2...）
+        """
         try:
             if not os.path.exists(file_path):
                 logger.error(f"❌ 源文件不存在: {file_path}")
                 return False
-            
-            file_size = os.path.getsize(file_path)
-            if file_size > self.max_file_size:
-                logger.warning(f"⚠️ 文件过大 ({file_size/1024/1024:.2f}MB)，跳过: {file_path}")
+
+            stable_size = await self._wait_for_file_stable(file_path)
+            if stable_size is None:
+                logger.error(f"❌ 等待源文件写入完成超时，跳过: {file_path}")
                 return False
-            
+            if stable_size > self.max_file_size:
+                logger.warning(f"⚠️ 文件过大 ({stable_size/1024/1024:.2f}MB)，跳过: {file_path}")
+                return False
+
             async with aiofiles.open(file_path, 'rb') as src, \
                      aiofiles.open(save_path, 'wb') as dst:
                 file_data = await src.read()
                 await dst.write(file_data)
-            
-            logger.info(f"✅ 复制本地文件: {save_path.name} ({file_size/1024:.1f}KB)")
-            
-            if save_path.exists() and save_path.stat().st_size == file_size:
+
+            written_size = save_path.stat().st_size if save_path.exists() else -1
+            if written_size == len(file_data) and len(file_data) > 0:
+                logger.info(f"✅ 复制本地文件: {save_path.name} ({len(file_data)/1024:.1f}KB)")
                 return True
-            else:
-                logger.error(f"❌ 文件复制后验证失败")
-                return False
-                
+
+            logger.error(
+                f"❌ 文件复制后验证失败 (应写入 {len(file_data)} bytes, 实际 {written_size} bytes)"
+            )
+            await self._cleanup_residual(save_path)
+            return False
+
         except Exception as e:
             logger.error(f"❌ 复制本地文件失败 {file_path}: {e}", exc_info=True)
+            await self._cleanup_residual(save_path)
             return False
+
+    async def _wait_for_file_stable(self, file_path: str, max_wait: float = 5.0) -> int:
+        """等待源文件大小稳定（适配器可能仍在下载/写入），返回稳定后的大小；超时或异常返回 None"""
+        try:
+            prev_size = os.path.getsize(file_path)
+            waited = 0.0
+            while waited < max_wait:
+                await asyncio.sleep(0.3)
+                waited += 0.3
+                try:
+                    cur_size = os.path.getsize(file_path)
+                except OSError:
+                    return None
+                if cur_size == prev_size:
+                    return cur_size
+                prev_size = cur_size
+            logger.warning(f"⚠️ 等待源文件大小稳定超时（{max_wait:.1f}s），文件可能仍在写入: {file_path}")
+            return None
+        except OSError:
+            return None
+
+    async def _cleanup_residual(self, save_path: Path) -> None:
+        """清理校验失败后残留的未完成文件，避免同名文件不断累积"""
+        try:
+            if save_path.exists():
+                save_path.unlink()
+                logger.info(f"🧹 已清理残留文件: {save_path.name}")
+        except OSError as e:
+            logger.warning(f"⚠️ 清理残留文件失败 {save_path.name}: {e}")
     
     async def _save_url_image(self, url: str, save_path: Path) -> bool:
         """从URL下载并保存图片（带超时和流式大小限制）"""
         try:
+            if not url.startswith(('http://', 'https://')):
+                logger.error(f"❌ 非HTTP(S)地址，无法下载: {url}")
+                return False
+            
             timeout = aiohttp.ClientTimeout(total=self.DOWNLOAD_TIMEOUT_SECONDS)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url) as response:
@@ -434,9 +489,13 @@ class ImageSaver:
     async def _save_image_from_event(self, image_id: str, save_path: Path) -> bool:
         """通过事件对象获取图片（备用方法，依赖 OneBot API）"""
         try:
+            if not (self.supported_platforms & self.ONE_BOT_PLATFORMS):
+                logger.warning(f"⚠️ 当前平台不支持OneBot API备用取图，跳过: {image_id}")
+                return False
+            
             logger.info(f"🔍 尝试使用平台适配器API获取图片: {image_id}")
             
-            api_url = f"{self.ONE_BOT_API_BASE}/get_image?file={quote(image_id, safe='')}"
+            api_url = f"{self.one_bot_api_base}/get_image?file={quote(image_id, safe='')}"
             
             timeout = aiohttp.ClientTimeout(total=self.DOWNLOAD_TIMEOUT_SECONDS)
             async with aiohttp.ClientSession(timeout=timeout) as session:
