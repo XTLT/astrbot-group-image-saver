@@ -1,14 +1,14 @@
-名称: astrbot_plugin_group_image_saver
-: 聊天图片自动保存
-简短描述: 自动保存群聊图片，按群号/日期归档，支持备注与自动询问备注
-描述: 自动保存群聊和好友发送的图片，支持备注功能、按群号和日期分类归档、群组/好友白名单黑名单过滤和路径警告
-: 0.1.5
-: 张力
-：https://github.com/XTLT/astrbot-group-image-saver
-: ["工具", "生活"]
+name: astrbot_plugin_group_image_saver
+display_name: 聊天图片自动保存工具
+short_desc: 自动保存群聊图片，按群号/日期归档，支持备注与自动询问备注
+desc: 自动保存群聊和好友发送的图片，支持备注功能、按群号和日期分类归档、群组/好友白名单黑名单过滤和路径警告，在飞牛系统上安装本插件后，**无需开启远程访问**，即可把聊天图片上传到飞牛 NAS。
+version: 0.1.5
+author: tension
+repo: https://github.com/XTLT/astrbot-group-image-saver
+tags: ["工具", "生活"]
 support_platforms:
   - aiocqhttp        # QQ个人号，完整支持
   - qq_official      # QQ官方接口，有限支持
-  - 电报         # 有限支持
+  - telegram         # 有限支持
   - lark             # 飞书，有限支持
   - wecom            # 企业微信，有限支持
