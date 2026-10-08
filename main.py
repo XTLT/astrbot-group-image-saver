@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 AstrBot 插件：聊天图片自动保存器
-版本: 0.1.5
+版本: 0.1.6
 
 功能：
 1. 自动保存群聊中发送的图片
@@ -42,7 +42,7 @@ from .private_filter import PrivateFilter
 from .image_saver import ImageSaver
 
 
-PLUGIN_VERSION = "0.1.5"
+PLUGIN_VERSION = "0.1.6"
 
 
 def _safe_message_datetime(event: AstrMessageEvent) -> datetime:
@@ -154,20 +154,54 @@ class GroupImageSaverPlugin(Star):
     
     @property
     def _runtime_config_path(self) -> Path:
-        """运行时过滤配置的本地持久化文件（AstrBot 配置系统不可用时的兜底）"""
-        return Path(__file__).parent / "data" / "runtime_config.json"
+        """运行时过滤配置的本地持久化文件（AstrBot 配置系统不可用时的兜底）
+
+        按上架规范写入 data/plugin_data/<plugin_name>/ 目录，该位置受用户
+        数据迁移与审计机制保护，插件更新时不会被覆盖或清空。
+        """
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+            return (
+                Path(get_astrbot_plugin_data_path())
+                / "astrbot_plugin_group_image_saver"
+                / "runtime_config.json"
+            )
+        except Exception:
+            # 极旧版本 AstrBot 无该接口时退回插件目录兜底，仅保证不抛异常
+            return Path(__file__).parent / "data" / "runtime_config.json"
     
     def _load_runtime_config(self):
-        """加载运行时持久化的过滤配置"""
+        """加载运行时持久化的过滤配置（含旧版插件目录数据的自动迁移）"""
         try:
-            if self._runtime_config_path.exists():
-                data = json.loads(self._runtime_config_path.read_text(encoding="utf-8"))
-                for key in self.RUNTIME_CONFIG_KEYS:
-                    if key in data and data[key] is not None:
-                        self.config[key] = data[key]
-                logger.info(f"📂 已加载运行时过滤配置: {self._runtime_config_path}")
+            path = self._runtime_config_path
+            if not path.exists():
+                # 兼容旧版本：插件自身目录下的 runtime_config.json 迁移到新位置
+                legacy_path = Path(__file__).parent / "data" / "runtime_config.json"
+                if legacy_path.exists():
+                    data = json.loads(legacy_path.read_text(encoding="utf-8"))
+                    self._apply_runtime_config(data)
+                    logger.info(f"📂 已从旧位置加载运行时过滤配置: {legacy_path}")
+                    try:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(
+                            json.dumps(data, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        logger.info(f"📂 已将运行时过滤配置迁移至: {path}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ 迁移旧配置到新位置失败: {e}")
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self._apply_runtime_config(data)
+            logger.info(f"📂 已加载运行时过滤配置: {path}")
         except Exception as e:
             logger.warning(f"⚠️ 加载运行时配置失败: {e}")
+
+    def _apply_runtime_config(self, data: dict):
+        """将运行时配置字典应用到当前配置"""
+        for key in self.RUNTIME_CONFIG_KEYS:
+            if key in data and data[key] is not None:
+                self.config[key] = data[key]
     
     def _persist_config(self):
         """持久化当前过滤配置（优先 AstrBot 配置系统，失败则写入本地 JSON）"""
