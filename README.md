@@ -359,6 +359,22 @@ su -s /bin/sh <AstrBot用户名> -c 'touch /你的/保存/路径/.write_test && 
 
 确认配置项 save_notes 为 true
 
+## 📝 版本更新说明
+
+### v0.1.9
+
+- 📖 新增飞牛 fnOS 通过 Docker 部署 AstrBot 的完整截图流程说明（见上文「通过 Docker 部署 AstrBot（截图流程）」）
+- 🧹 移除开发期调试/测试脚本：`test_plugin.py`、`_merge_test.py`、`_smoke_test_fix.py`
+- 🧹 清理警告日志中残留的本地开发机路径示例，改为通用占位路径
+- 🧹 删除调试用的目录列表与文件权限日志（`os.listdir` / `os.stat` 权限打印）
+- 🔧 收紧异常捕获：裸 `except:` 全部改为 `except Exception`，并在必要处补 `logger.debug` 便于排障
+
+### v0.1.8
+
+- 版本号例行更新，无功能变更
+
+---
+
 📄 许可证
 
 MIT LicenseMIT许可证
