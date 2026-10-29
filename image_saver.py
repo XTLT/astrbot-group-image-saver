@@ -65,7 +65,7 @@ class ImageSaver:
         if not self.path_status.get("is_mounted", False):
             logger.warning(f"⚠️ 警告：路径未挂载到宿主机，容器重启后数据将丢失！")
             logger.warning(f"⚠️ 建议：在docker run命令中使用 -v 参数挂载该路径")
-            logger.warning(f"⚠️ 例如：docker run -v /宿主机路径:/www/dk_project/dk_app/astrbot/astrbot_nJZP/data/saved_images ...")
+            logger.warning(f"⚠️ 例如：docker run -v /宿主机路径:/容器内保存路径 ...")
     
     def _validate_and_fix_path(self, user_path: str) -> Tuple[Path, Dict]:
         """验证并修复保存路径 - 包含挂载检测"""

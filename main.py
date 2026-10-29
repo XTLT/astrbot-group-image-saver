@@ -577,7 +577,7 @@ class GroupImageSaverPlugin(Star):
             if not self.image_saver.path_status.get("is_mounted", True):
                 logger.warning(f"🚨 警告：图片已保存到未挂载的路径，容器重启后数据将丢失！")
                 logger.warning(f"🚨 建议：在docker run命令中使用 -v 参数挂载该路径")
-                logger.warning(f"🚨 例如：docker run -v /宿主机路径:/www/dk_project/dk_app/astrbot/astrbot_nJZP/data/saved_images ...")
+                logger.warning(f"🚨 例如：docker run -v /宿主机路径:/容器内保存路径 ...")
                 logger.warning(f"🚨 或者在AstrBot WebUI中配置已挂载的路径")
         else:
             logger.error(f"❌ 所有图片保存失败，共 {len(image_components)} 张")
