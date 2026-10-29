@@ -131,8 +131,8 @@ class ImageSaver:
                 free_gb = (stat.f_bavail * stat.f_frsize) / (1024**3)
                 if free_gb < 1:
                     result["warnings"].append(f"⚠️ 磁盘空间不足: {free_gb:.1f}GB 可用")
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"磁盘空间检查失败（忽略）: {e}")
         
         result["message"] = f"✅ 路径可用且已挂载: {path.absolute()}"
         return path, result
@@ -229,7 +229,8 @@ class ImageSaver:
                         result["warnings"].append(f"警告: 使用临时路径，容器重启后数据会丢失")
                         result["warnings"].append(f"建议: 请在AstrBot插件配置中设置已挂载的路径")
                         return path, result
-                except:
+                except Exception as e:
+                    logger.debug(f"临时路径 {path} 写入测试失败（继续尝试下一个）: {e}")
                     continue
             
             current_dir = Path.cwd() / "saved_images"
@@ -336,8 +337,8 @@ class ImageSaver:
                     try:
                         if await self._save_local_file(file_source, save_path):
                             return True
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"本地文件保存失败，尝试备用取图: {e}")
                     logger.info(f"🔍 文件路径处理失败，尝试使用平台适配器API备用取图: {file_source}")
                     if self.supported_platforms & self.ONE_BOT_PLATFORMS:
                         return await self._save_image_from_event(file_source, save_path)

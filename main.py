@@ -84,7 +84,7 @@ class GroupImageSaverPlugin(Star):
                         try:
                             self.config = attr_value() or {}
                             break
-                        except:
+                        except Exception:
                             continue
                     elif attr_value:
                         self.config = attr_value or {}
@@ -521,18 +521,6 @@ class GroupImageSaverPlugin(Star):
                     saved_paths.append(full_path)
                     file_size = full_path.stat().st_size
                     logger.info(f"✅ 图片 {idx} 保存成功: {full_path} ({file_size} bytes)")
-                    logger.info(f"📁 绝对路径: {full_path.absolute()}")
-                    logger.info(f"📋 文件存在性检查: {full_path.exists()}")
-                    try:
-                        file_stat = os.stat(full_path)
-                        logger.info(f"🔐 文件权限: {oct(file_stat.st_mode)[-3:]}")
-                    except:
-                        pass
-                    try:
-                        dir_content = os.listdir(save_dir)
-                        logger.info(f"📂 目录内容: {dir_content}")
-                    except:
-                        pass
                 else:
                     logger.error(f"❌ 图片保存后文件不存在: {full_path}")
                     self.stats['successful_saves'] = max(0, self.stats['successful_saves'] - 1)
